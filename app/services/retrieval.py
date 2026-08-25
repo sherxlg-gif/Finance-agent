@@ -51,11 +51,13 @@ class RetrievalService:
         if not child_docs:
             return []
 
-        parent_ids = list(set([
-            doc.metadata.get("parent_id")
-            for doc in child_docs
-            if doc.metadata.get("parent_id")
-        ]))
+        parent_ids = []
+        best_child_by_parent = {}
+        for child_rank, doc in enumerate(child_docs, start=1):
+            parent_id = doc.metadata.get("parent_id")
+            if parent_id and parent_id not in best_child_by_parent:
+                parent_ids.append(parent_id)
+                best_child_by_parent[parent_id] = (doc, child_rank)
 
         if not parent_ids:
             logger.warning("⚠️ 命中的子块中没有找到 parent_id！")
@@ -66,10 +68,27 @@ class RetrievalService:
         with get_db_session() as db:
             try:
                 records = db.query(ParentDocument).filter(ParentDocument.id.in_(parent_ids)).all()
-                for record in records:
+                records_by_id = {record.id: record for record in records}
+                for parent_id in parent_ids:
+                    record = records_by_id.get(parent_id)
+                    if record is None:
+                        continue
+
+                    matched_child, child_rank = best_child_by_parent[parent_id]
+                    matched_page = matched_child.metadata.get("page_number")
+                    metadata = dict(record.meta_data or {})
+                    metadata.update({
+                        "matched_child_text": matched_child.page_content,
+                        "matched_page_number": matched_page,
+                        "child_rank": child_rank,
+                        "rrf_score": matched_child.metadata.get("rrf_score"),
+                    })
+                    if matched_page is not None:
+                        metadata["page_number"] = matched_page
+
                     parent_docs.append(Document(
                         page_content=record.content,
-                        metadata=record.meta_data or {}
+                        metadata=metadata,
                     ))
                 logger.info(f"✅ 成功提取 {len(parent_docs)} 个父块，即将送入 Reranker 重排！")
             except Exception as e:
@@ -154,7 +173,11 @@ class RetrievalService:
             )
 
             # 转换回 LangChain 认的 Document 格式
-            top_fused_docs = [Document(page_content=d["text"], metadata=d["metadata"]) for d in hybrid_results]
+            top_fused_docs = []
+            for result in hybrid_results:
+                metadata = dict(result.get("metadata") or {})
+                metadata["rrf_score"] = result.get("score")
+                top_fused_docs.append(Document(page_content=result["text"], metadata=metadata))
 
             if not top_fused_docs:
                 logger.warning("⚠️ 底层双路召回未找到任何匹配子块！")
