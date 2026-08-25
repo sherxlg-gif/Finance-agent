@@ -4,8 +4,10 @@
 """
 import pytest
 from unittest.mock import patch, MagicMock
+from types import SimpleNamespace
 from langchain_core.documents import Document
 
+from app.core.exceptions import RerankError
 from app.services.retrieval import RetrievalService
 
 
@@ -111,6 +113,66 @@ class TestRetrievalService:
         with patch("app.services.retrieval.get_db_session"):
             docs = mock_retrieval._fetch_parent_chunks(bad_docs)
             assert docs == []
+
+    def test_fetch_parent_chunks_preserves_child_rank_and_matched_metadata(self, mock_retrieval):
+        """父块顺序和引用信息来自首次命中的最佳子块。"""
+        child_docs = [
+            Document(
+                page_content="第二个父块的最佳命中子块",
+                metadata={"parent_id": "p2", "page_number": 42, "rrf_score": 0.032},
+            ),
+            Document(
+                page_content="第一个父块的命中子块",
+                metadata={"parent_id": "p1", "page_number": 7, "rrf_score": 0.025},
+            ),
+        ]
+        records = [
+            SimpleNamespace(id="p1", content="父块一", meta_data={"source": "report.pdf", "page_number": 1}),
+            SimpleNamespace(id="p2", content="父块二", meta_data={"source": "report.pdf", "page_number": 2}),
+        ]
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = records
+        context = MagicMock()
+        context.__enter__.return_value = db
+
+        with patch("app.services.retrieval.get_db_session", return_value=context):
+            docs = mock_retrieval._fetch_parent_chunks(child_docs)
+
+        assert [doc.page_content for doc in docs] == ["父块二", "父块一"]
+        assert docs[0].metadata["matched_child_text"] == "第二个父块的最佳命中子块"
+        assert docs[0].metadata["matched_page_number"] == 42
+        assert docs[0].metadata["page_number"] == 42
+        assert docs[0].metadata["child_rank"] == 1
+        assert docs[0].metadata["rrf_score"] == 0.032
+
+    def test_fetch_parent_chunks_returns_duplicate_parent_once(self, mock_retrieval):
+        child_docs = [
+            Document("最佳命中", metadata={"parent_id": "p1", "page_number": 8, "rrf_score": 0.03}),
+            Document("次佳命中", metadata={"parent_id": "p1", "page_number": 9, "rrf_score": 0.02}),
+        ]
+        record = SimpleNamespace(id="p1", content="同一个父块", meta_data={"source": "report.pdf"})
+        db = MagicMock()
+        db.query.return_value.filter.return_value.all.return_value = [record]
+        context = MagicMock()
+        context.__enter__.return_value = db
+
+        with patch("app.services.retrieval.get_db_session", return_value=context):
+            docs = mock_retrieval._fetch_parent_chunks(child_docs)
+
+        assert len(docs) == 1
+        assert docs[0].metadata["matched_child_text"] == "最佳命中"
+
+    def test_rerank_failure_keeps_rrf_parent_order(self, mock_retrieval):
+        parent_docs = [
+            Document("RRF 第一名", metadata={"parent_id": "p2"}),
+            Document("RRF 第二名", metadata={"parent_id": "p1"}),
+        ]
+        mock_retrieval._fetch_parent_chunks = MagicMock(return_value=parent_docs)
+        mock_retrieval._rerank_documents.side_effect = RerankError("rerank unavailable")
+
+        docs = mock_retrieval.run_pipeline(query="营业收入", final_top_n=2)
+
+        assert [doc.page_content for doc in docs] == ["RRF 第一名", "RRF 第二名"]
 
     def test_rerank_handles_empty(self, mock_retrieval):
         """Rerank 空列表返回空"""
