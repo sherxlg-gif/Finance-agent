@@ -1,0 +1,151 @@
+services:
+  # ==========================================
+  # 1. 向量计算层：隔离版 Milvus (v2.4.0) + Attu
+  # ==========================================
+  etcd-v2:
+    container_name: milvus-etcd-v2
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes_v2/etcd:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+
+  minio-v2:
+    container_name: milvus-minio-v2
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9003:9001"
+      - "9002:9000"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes_v2/minio:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+
+  standalone-v2:
+    container_name: milvus-standalone-v2
+    image: milvusdb/milvus:v2.4.0
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd-v2:2379
+      MINIO_ADDRESS: minio-v2:9000
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes_v2/milvus:/var/lib/milvus
+    ports:
+      - "19531:19530"
+      - "9092:9091"
+    depends_on:
+      - "etcd-v2"
+      - "minio-v2"
+
+  attu-v2:
+    container_name: milvus-attu-v2
+    image: zilliz/attu:v2.4.0
+    environment:
+      MILVUS_URL: milvus-standalone-v2:19530
+    ports:
+      - "8002:3000"
+    depends_on:
+      - "standalone-v2"
+
+  # ==========================================
+  # 2. 关系型存储层：PostgreSQL + pgAdmin
+  # ==========================================
+  postgres-v2:
+    container_name: finance-rag-postgres-v2
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: rag_user
+      POSTGRES_PASSWORD: rag_password
+      POSTGRES_DB: rag_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes_v2/postgres:/var/lib/postgresql/data
+
+  pgadmin-v2:
+    container_name: finance-rag-pgadmin-v2
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@rag.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    volumes:
+      - ${DOCKER_VOLUME_DIRECTORY:-.}/volumes_v2/pgadmin:/var/lib/pgadmin
+    depends_on:
+      - "postgres-v2"
+
+  # ==========================================
+  # 3. 核心业务层：FastAPI 后端引擎 🌟 新增
+  # ==========================================
+  backend-v2:
+    container_name: finance-rag-backend-v2
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/bash", "/app/docker-entrypoint.sh"]
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    environment:
+      # ⚠️ 架构师重点：在 Docker 网络里，不能用 127.0.0.1，必须用容器名！
+      - MILVUS_HOST=milvus-standalone-v2
+      - MILVUS_PORT=19530 # 注意：容器内部用回原生 19530
+      - PG_HOST=finance-rag-postgres-v2
+      - PG_PORT=5432      # 容器内部用回原生 5432
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY}
+      # 让容器直连阿里云 API，不走宿主机代理（避免 SSL 握手被代理中断）
+      - NO_PROXY=dashscope.aliyuncs.com,aliyuncs.com
+      - no_proxy=dashscope.aliyuncs.com,aliyuncs.com
+      # HuggingFace 镜像加速（国内网络必需）
+      - HF_ENDPOINT=https://hf-mirror.com
+      
+    env_file:
+      - .env
+    depends_on:
+      - standalone-v2
+      - postgres-v2
+    volumes:
+      - .:/app   # 🌟 关键：冒号左边是本地路径，右边是容器路径
+      # 缓存下载的模型，避免每次重新下载
+      - hf_cache:/root/.cache/huggingface
+
+  # ==========================================
+  # 4. React 前端 v2（Vite 开发服务器，代码挂载热更新）
+  # ==========================================
+  frontend-react-v2:
+    container_name: finance-rag-frontend-react-v2
+    build:
+      context: ./frontend-react-v2
+      dockerfile: Dockerfile
+      target: builder            # 只用 node 阶段（含全部依赖），不进入 nginx 阶段
+      args:
+        VITE_API_KEY: ${API_SECRET_KEY:-finance-rag-dev-key}
+    command: >
+      sh -c "npx vite --host 0.0.0.0 --port 80"
+    ports:
+      - "8502:80"
+    environment:
+      # Docker 网络内 API 代理目标（vite.config.ts 读取此变量）
+      - BACKEND_URL=http://finance-rag-backend-v2:8000
+      # 运行时覆盖 VITE_API_KEY（dev server 动态读取，无需重新构建）
+      - VITE_API_KEY=${API_SECRET_KEY:-finance-rag-dev-key}
+    depends_on:
+      - backend-v2
+    restart: unless-stopped
+    volumes:
+      # 挂载源码，修改即时生效（与后端热重启同理）
+      - ./frontend-react-v2:/app
+      # 隔离 node_modules，避免 Windows 宿主机权限问题
+      - frontend_node_modules_v2:/app/node_modules
+
+volumes:
+  hf_cache:
+  frontend_node_modules:
+  frontend_node_modules_v2:
