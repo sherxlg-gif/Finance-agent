@@ -5,14 +5,14 @@ Agent 长期记忆服务。
 后续对话中 Agent 可通过 memory_retriever_tool 语义检索历史记忆。
 
 存储架构（复用现有基础设施）：
-- Milvus (long_term_memories): Dense(1024维) + Sparse(BM25) 双向量，用于语义检索
+- Milvus (long_term_memories): Dense(1024维)，用于语义检索
 - PostgreSQL (long_term_memories 表): 存储原文，用于回填完整内容
 """
+import hashlib
 import logging
-import uuid
+import re
 from typing import Optional
 
-import jieba
 from langchain_community.embeddings import DashScopeEmbeddings
 from pymilvus import (
     connections,
@@ -22,13 +22,21 @@ from pymilvus import (
     FieldSchema,
     DataType,
 )
-from pymilvus.model.sparse import BM25EmbeddingFunction
 
 from app.core.config import settings
 from app.database import get_db_session, LongTermMemory
-from app.services.hybrid_search import HybridSearchEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_memory_part(value: str) -> str:
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def make_memory_id(query: str, answer: str) -> str:
+    """Create a stable ID for semantically identical whitespace-normalized Q&A."""
+    normalized = f"{_normalize_memory_part(query)}\0{_normalize_memory_part(answer)}"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 class MemoryService:
@@ -36,7 +44,6 @@ class MemoryService:
 
     def __init__(self):
         self._collection: Optional[Collection] = None
-        self._engine: Optional[HybridSearchEngine] = None
 
         # 复用 Embedding 模型（与检索共用同一 API）
         self.embeddings = DashScopeEmbeddings(
@@ -91,26 +98,13 @@ class MemoryService:
                 "params": {},
             })
 
-            # Sparse 向量索引
-            collection.create_index("sparse_vector", {
-                "index_type": "SPARSE_INVERTED_INDEX",
-                "metric_type": "IP",
-                "params": {"drop_ratio_build": 0.2},
-            })
-
-            logger.info("✅ 长期记忆向量表及双路索引创建完成！")
+            logger.info("✅ 长期记忆向量表及 Dense 索引创建完成！")
         else:
             collection = Collection(collection_name)
 
         collection.load()
         self._collection = collection
         return self._collection
-
-    def _get_engine(self) -> HybridSearchEngine:
-        """惰性获取双路检索引擎（复用于记忆检索）。"""
-        if self._engine is None:
-            self._engine = HybridSearchEngine()
-        return self._engine
 
     # ==========================================
     # 公开方法
@@ -131,17 +125,27 @@ class MemoryService:
         if not settings.MEMORY_ENABLED:
             return False
 
-        memory_text = f"[用户问题] {query}\n[AI回答] {answer}"
+        normalized_query = _normalize_memory_part(query)
+        normalized_answer = _normalize_memory_part(answer)
+        if not normalized_query or not normalized_answer:
+            return False
+
+        memory_text = f"[用户问题] {normalized_query}\n[AI回答] {normalized_answer}"
         meta = dict(metadata or {})
-        memory_id = uuid.uuid4().hex
+        memory_id = make_memory_id(normalized_query, normalized_answer)
 
         try:
             # --- 分支 1：写入 PostgreSQL 存储原文 ---
             with get_db_session() as db:
+                existing = db.query(LongTermMemory).filter(LongTermMemory.id == memory_id).first()
+                if existing is not None:
+                    logger.debug("🧠 相同问答已存在，跳过重复写入: %s", memory_id[:12])
+                    return False
+
                 record = LongTermMemory(
                     id=memory_id,
-                    user_query=query,
-                    assistant_answer=answer,
+                    user_query=normalized_query,
+                    assistant_answer=normalized_answer,
                     memory_text=memory_text,
                     meta_data=meta,
                 )
@@ -158,20 +162,11 @@ class MemoryService:
             # Dense 向量（云端 API）
             dense_vec = self.embeddings.embed_query(trunc_text)
 
-            # Sparse 向量（本地 BM25）
-            analyzer = BM25EmbeddingFunction(analyzer=jieba.lcut)
-            analyzer.fit([trunc_text])
-            sparse_matrix = analyzer.encode_documents([trunc_text])
-            sparse_dict = {
-                int(k): float(v)
-                for k, v in zip(sparse_matrix.indices, sparse_matrix.data)
-            }
-
             collection.insert([
                 [memory_id],       # chunk_id
                 [trunc_text],       # text
                 [dense_vec],        # dense_vector
-                [sparse_dict],      # sparse_vector
+                [{}],               # 保留现有 schema，长期记忆不使用 Sparse
                 [meta],             # metadata
             ])
             collection.flush()
@@ -186,7 +181,7 @@ class MemoryService:
 
     def search_memories(self, query: str, top_k: Optional[int] = None) -> list[dict]:
         """
-        语义检索历史记忆（双路召回 + RRF 融合）。
+        语义检索历史记忆（Dense-only）。
 
         返回格式: [{"text": str, "metadata": dict, "score": float}, ...]
         """
@@ -195,23 +190,27 @@ class MemoryService:
 
         try:
             collection = self._get_collection()
-            engine = self._get_engine()
 
             # 生成查询 Dense 向量
             query_dense_vec = self.embeddings.embed_query(
                 query[:settings.EMBEDDING_MAX_TEXT_LENGTH]
             )
 
-            # 复用双路检索引擎
-            results = engine.execute_search(
-                query=query,
-                query_dense_vec=query_dense_vec,
-                collection=collection,
-                expr=None,  # 记忆检索不做元数据过滤
-                top_k=top_k,
+            raw_results = collection.search(
+                data=[query_dense_vec],
+                anns_field="dense_vector",
+                param={"metric_type": "L2", "params": {}},
+                limit=top_k,
+                output_fields=["text", "metadata"],
             )
-
-            return results
+            return [
+                {
+                    "text": hit.entity.get("text"),
+                    "metadata": hit.entity.get("metadata", {}),
+                    "score": hit.distance,
+                }
+                for hit in raw_results[0]
+            ]
 
         except Exception as e:
             logger.warning(f"⚠️ 记忆检索失败: {e}")
