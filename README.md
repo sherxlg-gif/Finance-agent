@@ -6,12 +6,12 @@
 [![LangGraph](https://img.shields.io/badge/LangGraph-Agent-orange)](#)
 [![React](https://img.shields.io/badge/React-18-61dafb)](#)
 [![Tests](https://img.shields.io/badge/tests-53_passed-brightgreen)](#)
-[![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF)](https://github.com/sky-1201/RAG-Project/actions)
+[![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub_Actions-2088FF)](https://github.com/sherxlg-gif/Finance-agent/actions)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](#)
 
 面向金融财报场景的 **Agentic RAG 系统**。从 AI 生成的答案出发，可逐级追溯至原始 PDF 的精确页码——让每一条结论都可核查。
 
-**🌐 在线体验**：[http://47.121.141.8](http://47.121.141.8) | **代码仓库**：[GitHub](https://github.com/sky-1201/RAG-Project)
+**代码仓库**：[GitHub](https://github.com/sherxlg-gif/Finance-agent)
 
 ---
 
