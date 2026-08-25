@@ -50,6 +50,6 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
-            cd /root/RAG-Project
+            cd /root/Finance-agent
             git pull origin release
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
