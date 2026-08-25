@@ -182,6 +182,11 @@ def delete_file(file_hash: str):
                 deleted_mv = len(chunk_ids)
                 col.delete(expr=f'chunk_id in {chunk_ids}')
                 col.flush()
+                try:
+                    from app.services.sparse_rebuild import rebuild_sparse_vectors
+                    rebuild_sparse_vectors(col)
+                except Exception as rebuild_error:
+                    logger.warning(f"⚠️ BM25 自动重建失败，查询将降级为 dense_only: {rebuild_error}")
             logger.info(f"🧠 已删除 {deleted_mv} 条 Milvus 向量")
         except Exception as e:
             logger.warning(f"⚠️ Milvus 清理失败: {e}")

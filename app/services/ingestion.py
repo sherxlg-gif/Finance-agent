@@ -13,11 +13,11 @@ from langchain_core.documents import Document
 # Milvus 原生包
 from pymilvus import connections, utility
 from pymilvus import CollectionSchema, FieldSchema, DataType, Collection
-import jieba
-from pymilvus.model.sparse import BM25EmbeddingFunction
 
 # 自定义组件
 from app.core.config import settings
+from app.services.sparse_encoder import PersistentBM25Encoder
+from app.services.sparse_rebuild import rebuild_sparse_vectors
 from docling.document_converter import DocumentConverter
 
 # 引入 Postgres 数据库连接和表模型
@@ -447,11 +447,11 @@ class DocumentIngestionService:
             _progress("密集向量生成完毕，正在计算稀疏向量...", 75)
             # 【第 2 路】：在本地极速生成稀疏向量 (Sparse Vector)
             logger.info(f" 正在本地计算 {len(child_docs)} 个子块的 BM25 稀疏向量...")
-            analyzer = BM25EmbeddingFunction(analyzer=jieba.lcut)
-            # 拟合当前文档的词频
-            analyzer.fit(child_texts)
-            # 编码出稀疏矩阵 (包含词的 ID 和权重)
-            sparse_embeddings = analyzer.encode_documents(child_texts)
+            sparse_encoder = PersistentBM25Encoder()
+            if not sparse_encoder.load():
+                # 首次入库需要一个可插入的临时向量；写入后会立即按全量 Child 重建。
+                sparse_encoder.fit(child_texts)
+            sparse_embeddings = sparse_encoder.encode_documents(child_texts)
 
             # 组装并原生插入 Milvus（必须与你上面的 FieldSchema 顺序和数量严格一致！）
             milvus_insert_data = [
@@ -469,6 +469,12 @@ class DocumentIngestionService:
                 collection.flush()
             except Exception as e:
                 raise MilvusInsertError(f"Milvus 写入失败: {e}") from e
+
+            # Corpus 已变化。全量重建只读取现有向量，不重新解析 PDF 或调用 Dense Embedding。
+            try:
+                rebuild_sparse_vectors(collection)
+            except Exception as e:
+                logger.warning(f"⚠️ BM25 自动重建失败，查询将降级为 dense_only: {e}")
 
             logger.info("✅ 双库解耦入库完成！计算(Milvus)与存储(Postgres)彻底分离。")
             # 所有步骤都成功后，将文件指纹存入

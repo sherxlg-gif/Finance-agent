@@ -1,25 +1,35 @@
 import logging
-import jieba
 from typing import List, Dict
 from pymilvus import AnnSearchRequest, RRFRanker
-from pymilvus.model.sparse import BM25EmbeddingFunction
 from app.core.config import settings
+from app.services.sparse_encoder import PersistentBM25Encoder
 
 logger = logging.getLogger(__name__)
 
 
 class HybridSearchEngine:
-    def __init__(self):
+    def __init__(self, sparse_encoder=None):
         logger.info("🔌 初始化 Milvus 原生双路检索引擎...")
-        # 这里的 BM25 引擎不再需要存储海量数据，仅用于把用户的 Query 切词转化为稀疏矩阵
-        self.analyzer = BM25EmbeddingFunction(analyzer=jieba.lcut)
+        self.sparse_encoder = sparse_encoder or PersistentBM25Encoder()
+        self.last_search_mode = "dense_only"
+        self.last_sparse_nnz = 0
 
     def execute_search(self, query: str, query_dense_vec: list, collection, expr: str, top_k: int = 15) -> List[Dict]:
         """
         组装双路请求，并直接交由 Milvus 数据库底层完成并行召回与 RRF 融合
         """
-        # 1. 生成用户 Query 的稀疏向量矩阵
-        query_sparse_matrix = self.analyzer.encode_queries([query])
+        # 1. 使用与入库一致的持久化词表生成 Sparse Query。
+        try:
+            query_sparse_matrix = self.sparse_encoder.encode_query(query)
+            self.last_sparse_nnz = int(query_sparse_matrix.nnz)
+        except Exception as exc:
+            self.last_sparse_nnz = 0
+            logger.warning("Sparse 查询不可用，将执行 dense_only: %s", exc)
+            return self._execute_dense_only(query_dense_vec, collection, expr, top_k)
+
+        if self.last_sparse_nnz == 0:
+            logger.warning("Sparse 查询 nnz=0，将执行 dense_only")
+            return self._execute_dense_only(query_dense_vec, collection, expr, top_k)
 
         # 读取底层 C 语言数组的指针 (indptr) 和数据 (data)，避开版本差异
         sparse_dict_list = []
@@ -61,7 +71,27 @@ class HybridSearchEngine:
             output_fields=["text", "metadata"]
         )
 
-        # 5. 组装结果返回给外层
+        self.last_search_mode = "hybrid"
+        logger.info("retrieval_mode=hybrid sparse_nnz=%d", self.last_sparse_nnz)
+
+        return self._format_results(results)
+
+    def _execute_dense_only(self, query_dense_vec, collection, expr, top_k):
+        results = collection.search(
+            data=[query_dense_vec],
+            anns_field="dense_vector",
+            param={"metric_type": "L2", "params": {}},
+            limit=top_k,
+            expr=expr,
+            output_fields=["text", "metadata"],
+        )
+        self.last_search_mode = "dense_only"
+        logger.info("retrieval_mode=dense_only sparse_nnz=%d", self.last_sparse_nnz)
+        return self._format_results(results)
+
+    @staticmethod
+    def _format_results(results):
+        # 组装结果返回给外层
         final_docs = []
         for hit in results[0]:  # results[0] 对应唯一的 query
             final_docs.append({
