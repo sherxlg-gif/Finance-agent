@@ -1,55 +1,73 @@
-name: CI/CD
+name: CI
 
 on:
   push:
-    branches: [release, main, 'feature-*']
+    branches: [main]
   pull_request:
-    branches: [release, main]
+    branches: [main]
 
 jobs:
-  test:
+  backend:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 检出代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 设置 Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
+          cache: pip
 
-      - name: 缓存依赖
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-          restore-keys: pip-${{ runner.os }}-
-
-      - name: 安装依赖
+      - name: Install backend dependencies
         run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-mock
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
 
-      - name: 运行测试
+      - name: Run backend tests
         env:
           DASHSCOPE_API_KEY: ci-dummy-key
         run: pytest tests/ -v --tb=short
 
-  deploy:
-    needs: test
+  frontend:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/release'
+    defaults:
+      run:
+        working-directory: frontend-react-v2
 
     steps:
-      - name: SSH 部署到服务器
-        uses: appleboy/ssh-action@v1
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          host: ${{ secrets.SSH_HOST }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            cd /root/Finance-agent
-            git pull origin release
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend-react-v2/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint frontend
+        run: >-
+          npm run lint --
+          --rule "@typescript-eslint/no-unused-vars: off"
+          --rule "react-hooks/set-state-in-effect: off"
+
+      - name: Build frontend
+        run: npm run build
+
+  compose-config:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose configuration
+        env:
+          DASHSCOPE_API_KEY: ci-dummy-key
+          API_SECRET_KEY: ci-dummy-secret
+        run: docker compose config --quiet
