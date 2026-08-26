@@ -36,6 +36,18 @@ def test_chinese_query_uses_vocabulary_fitted_from_all_documents(tmp_path):
     assert query_vector.nnz > 0
 
 
+def test_bm25_warmup_loads_persisted_model_and_returns_nonzero_nnz(tmp_path):
+    model_path = tmp_path / "finance_bm25.json"
+    trained = PersistentBM25Encoder(model_path)
+    trained.fit(["中国石化 营业收入", "网络安全 研发投入"])
+    trained.save()
+
+    restored = PersistentBM25Encoder(model_path)
+
+    assert restored.warmup("中国石化 营业收入") > 0
+    assert restored.encode_query("营业收入").nnz > 0
+
+
 def test_hybrid_search_falls_back_to_dense_when_sparse_query_is_empty():
     sparse_encoder = MagicMock()
     sparse_encoder.encode_query.return_value = MagicMock(nnz=0)

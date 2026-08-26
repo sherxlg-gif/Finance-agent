@@ -87,6 +87,10 @@ class PersistentBM25Encoder:
         self._ensure_model(reject_dirty=True)
         return self._model.encode_queries([query])
 
+    def warmup(self, query: str = "财务报告") -> int:
+        """提前加载持久化模型和 Jieba 词典，返回预热查询的非零项数。"""
+        return int(self.encode_query(query).nnz)
+
     def _ensure_model(self, reject_dirty: bool) -> None:
         if reject_dirty and self.is_dirty:
             raise SparseEncoderUnavailable("BM25 corpus changed and requires rebuild")

@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.auth import AuthMiddleware
+from app.core.dependencies import get_retrieval_service
 from app.api.routes import router
 from app.database import init_db
 
@@ -43,3 +44,9 @@ async def startup_event():
     logger.info(f"📚 接口文档地址: http://{settings.API_HOST}:{settings.API_PORT}/docs")
     logger.info("⏳ 正在初始化 PostgreSQL 表结构...")
     init_db()
+    try:
+        retrieval_service = get_retrieval_service()
+        sparse_nnz = retrieval_service.hybrid_engine.sparse_encoder.warmup()
+        logger.info("BM25 查询编码器预热完成: sparse_nnz=%d", sparse_nnz)
+    except Exception as exc:
+        logger.warning("BM25 预热不可用，检索将按需降级 dense_only: %s", exc)
