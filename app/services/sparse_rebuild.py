@@ -8,7 +8,7 @@ from app.services.sparse_encoder import PersistentBM25Encoder
 logger = logging.getLogger(__name__)
 
 
-def rebuild_sparse_vectors(collection, batch_size: int = 500) -> dict[str, int]:
+def rebuild_sparse_vectors(collection, batch_size: int = 5000) -> dict[str, int]:
     """重算现有 Child 的 Sparse 向量，不触发 PDF 解析或 Dense Embedding。"""
     encoder = PersistentBM25Encoder()
     encoder.mark_dirty()

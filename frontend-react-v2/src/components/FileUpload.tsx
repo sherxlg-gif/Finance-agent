@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type DragEvent, type ChangeEvent } from 'react'
+import { useState, useEffect, useCallback, useRef, type DragEvent, type ChangeEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { uploadPDF, getUploadProgress } from '@/services/api'
 import { useChatStore } from '@/store/chatStore'
@@ -11,13 +11,18 @@ export function FileUpload() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [taskId, setTaskId] = useState<string | null>(null)
   const [progress, setProgress] = useState({ step: '', pct: 0 })
+  const progressFailures = useRef(0)
 
   // 轮询入库进度
   useEffect(() => {
     if (!taskId || uploadStatus !== 'uploading') return
-    const interval = setInterval(async () => {
+    progressFailures.current = 0
+    let active = true
+    const checkProgress = async () => {
       try {
         const p = await getUploadProgress(taskId)
+        if (!active) return
+        progressFailures.current = 0
         setProgress({ step: p.step, pct: p.progress_pct })
         if (p.status === 'success') {
           setUploadStatus('success', p.filename)
@@ -28,9 +33,22 @@ export function FileUpload() {
           toast.error('入库失败', { description: p.error || '未知错误' })
           setTaskId(null)
         }
-      } catch { /* 继续轮询 */ }
-    }, 1500)
-    return () => clearInterval(interval)
+      } catch {
+        // 网络短暂中断时继续轮询；连续失败避免界面永久停留在转圈状态。
+        progressFailures.current += 1
+        if (progressFailures.current >= 20 && active) {
+          setUploadStatus('error')
+          toast.error('无法获取入库进度', { description: '请检查后端服务后重试。' })
+          setTaskId(null)
+        }
+      }
+    }
+    void checkProgress()
+    const interval = setInterval(() => void checkProgress(), 1500)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
   }, [taskId, uploadStatus, setUploadStatus])
 
   const handleUpload = useCallback(async () => {
@@ -59,7 +77,7 @@ export function FileUpload() {
 
   const handleFileSelect = useCallback(
     (file: File) => {
-      if (!file.name.endsWith('.pdf')) {
+      if (!file.name.toLowerCase().endsWith('.pdf')) {
         toast.warning('仅支持 PDF 文件')
         return
       }
@@ -104,7 +122,7 @@ export function FileUpload() {
     <div className="space-y-2">
       {/* 拖拽区域 */}
       <div
-        className="rounded-lg border-2 border-dashed border-border p-4 text-center cursor-pointer transition-colors hover:border-primary/40 hover:bg-primary/[0.02]"
+        className={`rounded-lg border-2 border-dashed p-4 text-center cursor-pointer transition-colors hover:border-primary/40 hover:bg-primary/[0.02] ${isDragOver ? 'border-primary bg-primary/[0.04]' : 'border-border'}`}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
@@ -143,10 +161,18 @@ export function FileUpload() {
 
       {/* 已选文件 */}
       {selectedFile && (
-        <div className="flex items-center gap-2 rounded-md border bg-card px-2.5 py-2">
+        <div className="flex items-start gap-2 rounded-md border bg-card px-2.5 py-2">
           <FileText className="h-4 w-4 text-primary shrink-0" />
-          <span className="flex-1 truncate text-xs">{selectedFile.name}</span>
-          <Button size="sm" className="h-7 text-xs" onClick={handleUpload} disabled={uploadStatus === 'uploading'}>
+          <span className="min-w-0 flex-1 break-all text-xs leading-relaxed" title={selectedFile.name}>{selectedFile.name}</span>
+          <Button
+            size="sm"
+            className="h-7 shrink-0 text-xs"
+            onClick={(event) => {
+              event.stopPropagation()
+              void handleUpload()
+            }}
+            disabled={uploadStatus === 'uploading'}
+          >
             入库
           </Button>
         </div>

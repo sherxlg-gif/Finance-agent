@@ -34,7 +34,8 @@ logger = logging.getLogger(__name__)
 class DocumentIngestionService:
     def __init__(self):
         # 1. 初始化 PDF 解析器
-        self.converter = DocumentConverter()
+        # Docling 模型体积大、初始化慢；仅在 pypdf 无法提取文本时按需加载。
+        self.converter = None
 
         # 2. 初始化 Embedding 模型 (阿里通义千问)
         self.embeddings = DashScopeEmbeddings(
@@ -116,6 +117,25 @@ class DocumentIngestionService:
                 best_score, best_page = matches, page_num
 
         return best_page
+
+    def _extract_text_with_pypdf(self, path: Path) -> tuple[str, dict[int, str], int]:
+        """快速提取数字 PDF 文本；返回 Markdown、逐页文本和总页数。"""
+        reader = PdfReader(path)
+        page_texts: dict[int, str] = {}
+        for i, page in enumerate(reader.pages):
+            try:
+                page_texts[i + 1] = page.extract_text() or ""
+            except Exception:
+                page_texts[i + 1] = ""
+        md_text = "\n\n".join(
+            f"[第 {page_no} 页]\n{text}" for page_no, text in page_texts.items() if text.strip()
+        )
+        return md_text, page_texts, len(reader.pages)
+
+    def _get_docling_converter(self) -> DocumentConverter:
+        if self.converter is None:
+            self.converter = DocumentConverter()
+        return self.converter
 
     def _extract_metadata_via_llm(self, md_text: str) -> dict:
         """
@@ -212,42 +232,59 @@ class DocumentIngestionService:
 
             try:
                 # 1. 先用极其轻量的 pypdf 看一下总页数，同时提取每页文本用于页码追踪
-                reader = PdfReader(path)
-                total_pages = len(reader.pages)
+                md_text, page_texts, total_pages = self._extract_text_with_pypdf(path)
                 logger.info(f"📄 检测到该文件共有 {total_pages} 页，准备切片解析...")
 
-                # 提取每页纯文本（轻量操作，用于后续 chunk 页码匹配）
-                page_texts = {}
-                for i, page in enumerate(reader.pages):
-                    try:
-                        txt = page.extract_text() or ""
-                    except Exception:
-                        txt = ""
-                    page_texts[i + 1] = txt
-
-                # 2. 每 N 页为一个批次，防止内存爆炸
-                batch_pages = settings.PDF_BATCH_PAGES
-
-                # 如果用户没有指定页码，我们就自己按批次循环
-                if page_range is None:
-                    for start_page in range(1, total_pages + 1, batch_pages):
-                        end_page = min(start_page + batch_pages - 1, total_pages)
-                        logger.info(f"⏳ 正在解析批次: 第 {start_page} ~ {end_page} 页...")
-
-                        #  Docling 只处理这几十页
-                        doc_result = self.converter.convert(path, page_range=(start_page, end_page))
-                        # 把这部分转成 Markdown 拼接到总文本里
-                        md_text += doc_result.document.export_to_markdown() + "\n\n"
-
+                if page_range is not None:
+                    range_start, range_end = page_range
+                    page_texts = {
+                        page_no: text
+                        for page_no, text in page_texts.items()
+                        if range_start <= page_no <= range_end
+                    }
+                    md_text = "\n\n".join(
+                        f"[第 {page_no} 页]\n{text}" for page_no, text in page_texts.items() if text.strip()
+                    )
+                extracted_chars = sum(len(text.strip()) for text in page_texts.values())
+                # 数字 PDF 直接使用 pypdf，避免 Docling 对每个批次重复执行版面模型。
+                # 文本过少时视为扫描件，继续走 Docling 解析以保留 OCR 能力。
+                if page_range is None and extracted_chars >= max(2000, total_pages * 20):
+                    md_text = "\n\n".join(
+                        f"[第 {page_no} 页]\n{text}" for page_no, text in page_texts.items() if text.strip()
+                    )
+                    _progress(f"文本解析完成 ({total_pages} 页)，正在切分文本...", 35)
+                elif page_range is not None and extracted_chars >= 2000:
+                    md_text = "\n\n".join(
+                        f"[第 {page_no} 页]\n{text}" for page_no, text in page_texts.items() if text.strip()
+                    )
+                    _progress(f"文本解析完成 ({total_pages} 页)，正在切分文本...", 35)
                 else:
-                    # 如果用户本来就指定了小范围，就按用户的来
-                    doc_result = self.converter.convert(path, page_range=page_range)
-                    md_text = doc_result.document.export_to_markdown()
+                    md_text = ""
+                    converter = self._get_docling_converter()
+
+                    # 2. 每 N 页为一个批次，防止内存爆炸
+                    batch_pages = settings.PDF_BATCH_PAGES
+
+                    # 如果用户没有指定页码，我们就自己按批次循环
+                    if page_range is None:
+                        for start_page in range(1, total_pages + 1, batch_pages):
+                            end_page = min(start_page + batch_pages - 1, total_pages)
+                            logger.info(f"⏳ 正在解析批次: 第 {start_page} ~ {end_page} 页...")
+                            batch_pct = 15 + int((end_page / total_pages) * 20)
+                            _progress(f"正在解析第 {start_page}-{end_page} 页 ({end_page}/{total_pages})...", batch_pct)
+
+                            # Docling 只处理这几十页
+                            doc_result = converter.convert(path, page_range=(start_page, end_page))
+                            md_text += doc_result.document.export_to_markdown() + "\n\n"
+
+                    else:
+                        doc_result = converter.convert(path, page_range=page_range)
+                        md_text = doc_result.document.export_to_markdown()
 
             except Exception as e:
                 logger.warning(f"⚠️ 分块解析失败，尝试退回全量解析: {e}")
                 try:
-                    doc_result = self.converter.convert(path)
+                    doc_result = self._get_docling_converter().convert(path)
                     md_text = doc_result.document.export_to_markdown()
                 except Exception as full_error:
                     raise PDFParseError(f"PDF 解析完全失败: {full_error}") from full_error
@@ -424,6 +461,11 @@ class DocumentIngestionService:
             for i in range(0, len(child_texts), batch_size):
                 batch_texts = child_texts[i:i + batch_size]
                 logger.info(f"   进度: {i + 1} ~ {min(i + batch_size, len(child_texts))} / {len(child_texts)}")
+                embed_pct = 55 + int((min(i + batch_size, len(child_texts)) / len(child_texts)) * 20)
+                _progress(
+                    f"正在生成向量 ({min(i + batch_size, len(child_texts))}/{len(child_texts)})...",
+                    embed_pct,
+                )
                 batch_texts_for_embed = [t[:settings.EMBEDDING_MAX_TEXT_LENGTH] for t in batch_texts]
 
                 # 带重试的 API 调用
@@ -472,7 +514,9 @@ class DocumentIngestionService:
 
             # Corpus 已变化。全量重建只读取现有向量，不重新解析 PDF 或调用 Dense Embedding。
             try:
+                _progress("正在更新混合检索索引...", 95)
                 rebuild_sparse_vectors(collection)
+                _progress("混合检索索引更新完成", 98)
             except Exception as e:
                 logger.warning(f"⚠️ BM25 自动重建失败，查询将降级为 dense_only: {e}")
 

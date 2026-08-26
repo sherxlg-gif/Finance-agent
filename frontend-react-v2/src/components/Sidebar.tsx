@@ -168,9 +168,9 @@ export function Sidebar({
         className={cn(
           'flex h-full flex-col border-r bg-card transition-all duration-300',
           'hidden lg:flex',
-          collapsed ? 'lg:w-0 lg:overflow-hidden lg:border-r-0' : 'lg:w-[280px]',
+          collapsed ? 'lg:w-0 lg:overflow-hidden lg:border-r-0' : 'lg:w-[340px]',
           'lg:relative',
-          mobileOpen ? 'fixed inset-y-0 left-0 z-40 flex w-[280px] shadow-2xl' : ''
+          mobileOpen ? 'fixed inset-y-0 left-0 z-40 flex w-[min(340px,100vw)] shadow-2xl' : ''
         )}
       >
         {/* Logo */}
@@ -323,8 +323,8 @@ export function Sidebar({
                       onClick={() => openPdfViewer(f.file_hash, f.file_name, 1)}
                     >
                       <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
-                      <div className="flex-1 min-w-0">
-                        <div className="truncate text-xs leading-tight">{f.file_name}</div>
+                      <div className="min-w-0 flex-1">
+                        <div className="break-all text-xs leading-relaxed" title={f.file_name}>{f.file_name}</div>
                         <div className="text-[10px] text-muted-foreground/70 mt-0.5 leading-tight">
                           {(f.file_size / 1024 / 1024).toFixed(1)} MB
                           {f.upload_time && ` · ${new Date(f.upload_time).toLocaleDateString('zh-CN')}`}

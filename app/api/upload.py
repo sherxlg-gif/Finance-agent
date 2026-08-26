@@ -1,7 +1,9 @@
 """PDF 上传与入库进度接口"""
 import logging
+import hashlib
 import os
 import shutil
+import threading
 import uuid
 
 from fastapi import APIRouter, HTTPException, File, UploadFile, BackgroundTasks
@@ -15,6 +17,8 @@ from app.database import get_db_session, UploadedFile, ParentDocument
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_active_ingestions: set[str] = set()
+_active_ingestions_lock = threading.Lock()
 
 
 class UploadResponse(BaseModel):
@@ -23,26 +27,52 @@ class UploadResponse(BaseModel):
     task_id: str | None = None
 
 
+def _is_pdf_filename(filename: str | None) -> bool:
+    """Return whether a client-provided filename has a PDF extension."""
+    return bool(filename and filename.lower().endswith(".pdf"))
+
+
 def process_and_ingest_document(file_path: str, original_filename: str, task_id: str | None = None):
     logger.info(f"⏳ 后台任务开始：处理文件 {original_filename}")
+    owns_ingestion = False
 
     def on_progress(step: str, pct: int):
         if task_id:
             update_progress(task_id, step, pct)
 
     try:
+        # 上传接口允许快速连续提交；同一内容只保留一个解析任务，避免重复占满 CPU/内存。
+        file_hash = hashlib.md5()
+        with open(file_path, "rb") as uploaded_file:
+            for chunk in iter(lambda: uploaded_file.read(1024 * 1024), b""):
+                file_hash.update(chunk)
+        digest = file_hash.hexdigest()
+        with _active_ingestions_lock:
+            if digest in _active_ingestions:
+                if task_id:
+                    mark_error(task_id, "相同文件正在处理中，请等待已有任务完成")
+                logger.info(f"⏭️ 文件 {original_filename} 已有任务处理中，跳过重复解析。")
+                return
+            _active_ingestions.add(digest)
+            owns_ingestion = True
+
         if task_id:
             update_progress(task_id, "启动解析引擎...", 10)
         ingestion_service = DocumentIngestionService()
-        ingestion_service.run_pipeline(
+        result = ingestion_service.run_pipeline(
             pdf_path=file_path,
             original_filename=original_filename,
             page_range=None,
             progress_callback=on_progress,
         )
-        logger.info(f"✅ 后台任务完成：文件 {original_filename} 已成功入库。")
-        if task_id:
-            mark_success(task_id)
+        if result.get("status") == "skipped":
+            logger.info(f"⏭️ 文件 {original_filename} 已存在，跳过入库。")
+            if task_id:
+                mark_error(task_id, "文件已存在，无需重复入库")
+        else:
+            logger.info(f"✅ 后台任务完成：文件 {original_filename} 已成功入库。")
+            if task_id:
+                mark_success(task_id)
     except DuplicateFileError:
         logger.info(f"⏭️ 文件 {original_filename} 已存在，跳过入库。")
         if task_id:
@@ -59,6 +89,10 @@ def process_and_ingest_document(file_path: str, original_filename: str, task_id:
         logger.error(f"❌ 未知错误 [{original_filename}]: {e}", exc_info=True)
         if task_id:
             mark_error(task_id, str(e))
+    finally:
+        if owns_ingestion:
+            with _active_ingestions_lock:
+                _active_ingestions.discard(digest)
 
 
 @router.post("/upload", response_model=UploadResponse, summary="上传财报 PDF 并入库")
@@ -66,10 +100,11 @@ async def upload_document(
         background_tasks: BackgroundTasks,
         file: UploadFile = File(...)
 ):
-    if not file.filename.endswith(".pdf"):
+    original_filename = file.filename or ""
+    if not _is_pdf_filename(original_filename):
         raise HTTPException(status_code=400, detail="只支持上传 PDF 文件")
 
-    logger.info(f"📥 接收到文件上传请求: {file.filename}")
+    logger.info(f"📥 接收到文件上传请求: {original_filename}")
 
     raw_dir = settings.RAW_DATA_PATH
     os.makedirs(raw_dir, exist_ok=True)
@@ -87,12 +122,12 @@ async def upload_document(
         await file.close()
 
     task_id = uuid.uuid4().hex[:12]
-    create_task(task_id, file.filename)
-    background_tasks.add_task(process_and_ingest_document, file_path, file.filename, task_id)
+    create_task(task_id, original_filename)
+    background_tasks.add_task(process_and_ingest_document, file_path, original_filename, task_id)
 
     return UploadResponse(
         message="文件上传成功，系统正在后台解析入库。",
-        filename=file.filename,
+        filename=original_filename,
         task_id=task_id,
     )
 
