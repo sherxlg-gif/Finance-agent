@@ -57,7 +57,7 @@ def end_retrieval_request(token: Token) -> None:
 
 
 @tool
-def financial_retriever_tool(query: str, company: str = None, year: str = None) -> str:
+def financial_retriever_tool(query: str, company: str | None = None, year: str | None = None) -> str:
     """
     当你需要查询真实客观的上市公司的财务数据、业务情况、联系人等信息时，必须优先调用此工具。
     输入参数：
@@ -66,7 +66,7 @@ def financial_retriever_tool(query: str, company: str = None, year: str = None) 
     - year: 年份，例如"2025"（可选。⚠️ 极度重要警告：如果用户提问中没有明确说出具体的年份，你必须将此参数保留为空(null/None)，绝对不允许使用默认值或自行猜测年份！）
 
     返回：
-    包含上下文片段的纯文本，请仔细阅读返回的文本以提取事实。
+    每条证据均明确区分来源文件、命中页码、命中原文（用于引用预览）和完整上下文（用于回答）。
     """
 
     request_state = _retrieval_request_state.get()
@@ -93,13 +93,24 @@ def financial_retriever_tool(query: str, company: str = None, year: str = None) 
         for i, d in enumerate(docs):
             source = d.metadata.get("source", "未知文件")
             score = d.metadata.get("rerank_score", "N/A")
-            page = d.metadata.get("page_number", "")
+            page = d.metadata.get("matched_page_number")
+            if page is None:
+                page = d.metadata.get("page_number", "")
             file_hash = d.metadata.get("file_hash", "")
+            # Parent 正文完整保留给 LLM；来源预览仅展示真正命中的 Child 文本。
+            matched_text = (
+                d.metadata["matched_child_text"]
+                if "matched_child_text" in d.metadata
+                else d.page_content
+            )
             context_parts.append(
-                f"--- 证据 {i + 1} [来源: {source}, 相关度: {score}"
-                + (f", 页码: {page}" if page else "")
-                + (f", hash: {file_hash}" if file_hash else "")
-                + f"] ---\n{d.page_content}\n"
+                f"--- 证据 {i + 1} ---\n"
+                f"[来源文件] {source}\n"
+                f"[命中页码] {page if page else ''}\n"
+                f"[命中原文] {matched_text}\n"
+                f"[完整上下文]\n{d.page_content}\n"
+                f"[相关度] {score}\n"
+                f"[hash] {file_hash}\n"
             )
 
         return "\n".join(context_parts)

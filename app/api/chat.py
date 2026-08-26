@@ -17,11 +17,49 @@ router = APIRouter()
 def _parse_sources(output_text: str) -> list[dict]:
     """
     从检索工具的输出中提取引用来源信息。
-    工具输出格式: --- 证据 N [来源: 文件名, 相关度: 0.95, 页码: 42, hash: abc123] ---
+    工具输出格式优先为带固定字段标签的结构化证据块；同时兼容旧版
+    ``--- 证据 N [来源: ..., 页码: ...] ---`` 格式。
 
     返回去重后的来源列表，附带页码、文件哈希和原文片段预览。
     """
-    # 按证据块拆分
+    # 新格式：固定字段标签，命中原文与完整上下文明确分隔。
+    structured_blocks = re.findall(
+        r"--- 证据 \d+ ---\s*(.*?)(?=--- 证据 \d+ ---|$)",
+        output_text or "",
+        flags=re.S,
+    )
+    if structured_blocks:
+        sources = []
+        seen: set[str] = set()
+        for block in structured_blocks:
+            file_match = re.search(r"^\[来源文件\]\s*(.*?)\s*$", block, flags=re.M)
+            if not file_match:
+                continue
+            page_match = re.search(r"^\[命中页码\]\s*(\d+)\s*$", block, flags=re.M)
+            score_match = re.search(r"^\[相关度\]\s*([^\r\n]+)", block, flags=re.M)
+            hash_match = re.search(r"^\[hash\]\s*([^\r\n]*)", block, flags=re.M)
+            snippet_match = re.search(
+                r"^\[命中原文\]\s*(.*?)(?=^\[完整上下文\]|$)",
+                block,
+                flags=re.M | re.S,
+            )
+            file_name = file_match.group(1).strip() or "未知文件"
+            # Structured evidence must not invent a page when provenance is absent.
+            page_num = int(page_match.group(1)) if page_match else None
+            dedup_key = f"{file_name}|{page_num}"
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            sources.append({
+                "file": file_name,
+                "score": score_match.group(1).strip() if score_match else "N/A",
+                "page_number": page_num,
+                "file_hash": hash_match.group(1).strip() if hash_match else "",
+                "snippet": (snippet_match.group(1).strip()[:200] if snippet_match else ""),
+            })
+        return sources
+
+    # 兼容旧格式：按证据块拆分
     blocks = re.split(r'--- 证据 \d+ \[(.*?)\] ---', output_text)
     # blocks[0] = 前言（无效），之后交替: metadata, content, metadata, content...
     sources = []

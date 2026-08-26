@@ -118,10 +118,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
           const { messages: current } = get()
           const updated = [...current]
           const lastIdx = updated.length - 1
-          if (updated[lastIdx]?.role === 'assistant') {
-            updated[lastIdx] = { ...updated[lastIdx], sources }
-            set({ messages: updated })
+          if (updated[lastIdx]?.role !== 'assistant') return
+
+          // 对比问题可能触发多次检索；合并各次 SSE 来源事件，避免后一次覆盖前一次。
+          const existing = updated[lastIdx].sources ?? []
+          const merged = [...existing]
+          const seen = new Set(
+            existing.map((source) => `${source.file_hash || source.file}|${source.page_number ?? ''}`)
+          )
+          for (const source of sources) {
+            const key = `${source.file_hash || source.file}|${source.page_number ?? ''}`
+            if (!seen.has(key)) {
+              seen.add(key)
+              merged.push(source)
+            }
           }
+          updated[lastIdx] = { ...updated[lastIdx], sources: merged }
+          set({ messages: updated })
         },
 
         onDone: () => {

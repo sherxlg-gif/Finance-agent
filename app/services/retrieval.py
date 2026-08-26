@@ -95,6 +95,10 @@ class RetrievalService:
                     matched_child, child_rank = best_child_by_parent[parent_id]
                     matched_page = matched_child.metadata.get("page_number")
                     metadata = dict(record.meta_data or {})
+                    # Keep child provenance available even when legacy parent metadata is sparse.
+                    for key in ("source", "file_hash"):
+                        if key not in metadata and matched_child.metadata.get(key) is not None:
+                            metadata[key] = matched_child.metadata[key]
                     metadata.update({
                         "matched_child_text": matched_child.page_content,
                         "matched_page_number": matched_page,

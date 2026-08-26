@@ -107,6 +107,23 @@ class _EmptyAgentExecutor:
             yield None
 
 
+class _ToolOnlyAgentExecutor:
+    async def astream_events(self, *_args, **_kwargs):
+        yield {
+            "event": "on_tool_end",
+            "name": "financial_retriever_tool",
+            "data": {
+                "output": (
+                    "--- 证据 1 ---\n"
+                    "[来源文件] 报告.pdf\n"
+                    "[命中页码] 58\n"
+                    "[命中原文] 命中片段\n"
+                    "[完整上下文]\n完整上下文\n"
+                )
+            },
+        }
+
+
 def test_chat_stream_opens_and_closes_request_retrieval_scope():
     agent_service = MagicMock()
     agent_service.system_prompt = "test prompt"
@@ -127,3 +144,78 @@ def test_chat_stream_opens_and_closes_request_retrieval_scope():
     begin.assert_called_once_with("营收是多少？")
     end.assert_called_once_with(token)
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+def test_chat_stream_emits_sources_even_without_model_citation():
+    agent_service = MagicMock()
+    agent_service.system_prompt = "test prompt"
+    agent_service.agent_executor = _ToolOnlyAgentExecutor()
+    token = object()
+
+    async def consume_stream():
+        response = await chat_stream_endpoint(ChatRequest(query="营收是多少？"))
+        return [chunk async for chunk in response.body_iterator]
+
+    with (
+        patch("app.api.chat.get_agent_service", return_value=agent_service),
+        patch("app.api.chat.begin_retrieval_request", return_value=token),
+        patch("app.api.chat.end_retrieval_request"),
+    ):
+        chunks = asyncio.run(consume_stream())
+
+    source_chunks = [chunk for chunk in chunks if '"type": "sources"' in chunk]
+    assert len(source_chunks) == 1
+    assert '"page_number": 58' in source_chunks[0]
+
+
+def test_chat_stream_does_not_emit_sources_without_retrieval_evidence():
+    agent_service = MagicMock()
+    agent_service.system_prompt = "test prompt"
+    agent_service.agent_executor = _EmptyAgentExecutor()
+    token = object()
+
+    async def consume_stream():
+        response = await chat_stream_endpoint(ChatRequest(query="营收是多少？"))
+        return [chunk async for chunk in response.body_iterator]
+
+    with (
+        patch("app.api.chat.get_agent_service", return_value=agent_service),
+        patch("app.api.chat.begin_retrieval_request", return_value=token),
+        patch("app.api.chat.end_retrieval_request"),
+    ):
+        chunks = asyncio.run(consume_stream())
+
+    assert not any('"type": "sources"' in chunk for chunk in chunks)
+
+
+def test_parse_sources_prefers_matched_child_text_over_full_context():
+    output = (
+        "--- 证据 1 ---\n"
+        "[来源文件] 电科数字2025年报.pdf\n"
+        "[命中页码] 20\n"
+        "[命中原文] 子块命中片段\n"
+        "[完整上下文]\n"
+        "父块包含大量上下文但不应作为预览\n"
+        "[相关度] 0.87\n"
+        "[hash] filehash\n"
+    )
+    sources = _parse_sources(output)
+    assert sources == [{
+        "file": "电科数字2025年报.pdf",
+        "score": "0.87",
+        "page_number": 20,
+        "file_hash": "filehash",
+        "snippet": "子块命中片段",
+    }]
+
+
+def test_parse_sources_supports_multiple_pages_in_structured_format():
+    output = (
+        "--- 证据 1 ---\n[来源文件] 报告.pdf\n[命中页码] 20\n[命中原文] 页20\n[完整上下文]\n上下文20\n"
+        "--- 证据 2 ---\n[来源文件] 报告.pdf\n[命中页码] 58\n[命中原文] 页58\n[完整上下文]\n上下文58\n"
+    )
+    sources = _parse_sources(output)
+    assert [(s["file"], s["page_number"], s["snippet"]) for s in sources] == [
+        ("报告.pdf", 20, "页20"),
+        ("报告.pdf", 58, "页58"),
+    ]
