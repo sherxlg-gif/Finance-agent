@@ -1,11 +1,11 @@
-# 📈 Finance-RAG — 金融投研 Agentic RAG 系统
+# Finance Agent
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-green)](#)
 [![Milvus](https://img.shields.io/badge/Milvus-2.4-blueviolet)](#)
 [![LangGraph](https://img.shields.io/badge/LangGraph-Agent-orange)](#)
-[![React](https://img.shields.io/badge/React-18-61dafb)](#)
-[![Tests](https://img.shields.io/badge/tests-53_passed-brightgreen)](#)
+[![React](https://img.shields.io/badge/React-19-61dafb)](#)
+[![CI](https://github.com/sherxlg-gif/Finance-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/sherxlg-gif/Finance-agent/actions/workflows/ci.yml)
 
 面向金融财报场景的 **Agentic RAG 系统**。从 AI 生成的答案出发，可逐级追溯至原始 PDF 的精确页码——让每一条结论都可核查。
 
@@ -29,27 +29,31 @@
 - **安全拦截** —— `import os` / `open()` / `exec()` 全部被阻止
 - **5 项安全边界测试**覆盖，子进程完全隔离
 
-### 📊 双路召回 + RRF 融合 + Rerank 重排
+### 📊 Dense / Sparse 召回 + RRF 融合 + Rerank 重排
 
-自研 `HybridSearchEngine`，在 Milvus 底层 C++ 完成并行召回与融合：
+`HybridSearchEngine` 使用 Milvus 的 Dense 和 Sparse 索引并行召回，再进行 RRF 融合：
 
 ```
 Dense (1024d 语义向量) ─┐
-                         ├→ RRF 倒数排序融合 → gte-rerank-v2 精排 → Top-5 父块
-Sparse (BM25 中文分词) ──┘
+                         ├→ RRF 倒数排序融合 → gte-rerank-v2 精排 → Top-N 父块
+Sparse (持久化 BM25) ───┘
 ```
 
-语义泛化与关键词精准兼顾，金融专有名词召回率显著提升。
+财报检索优先使用统一持久化的 BM25 词表和 Dense 向量；BM25 模型缺失、损坏或查询向量为空时，会明确降级为 `dense_only`，不会伪装成双路检索。可用以下命令从现有 Milvus Child 数据重建 Sparse 向量：
+
+```bash
+python -m app.scripts.rebuild_sparse
+```
 
 ### 📦 Parent-Child 存储解耦
 
-抛弃简单粗暴的单层向量切分。完整语义段落（Parent）存 **PostgreSQL** 保障阅读连贯性，细粒度子块（Child）向量化入 **Milvus** 保障检索精度。检索命中子块后"顺藤摸瓜"回填父块上下文，从根本上解决语义截断。
+Parent-Child 切分保持当前 `500` 字符块、`50` 字符重叠的参数。完整语义段落（Parent）存 **PostgreSQL**，细粒度子块（Child）及其向量存入 **Milvus**。检索命中 Child 后按命中顺序回填 Parent，并保留命中 Child 文本和实际页码，兼顾上下文完整性与引用可核验性。
 
 ### 💾 三层记忆体系
 
 - **短期记忆** — 当前对话上下文窗口
 - **对话持久化** — PostgreSQL JSONB 存储，侧边栏随时切换历史对话
-- **长期记忆** — Q&A 片段向量化存入 Milvus，跨对话语义检索。用户说"上次那个公司"，Agent 自动搜索记忆库找回历史事实
+- **长期记忆** — 只有明确引用“上次、以前、其他对话”时才调用；Q&A 片段以 Dense 向量存入 Milvus，跨对话进行语义检索。相同的规范化问答不会重复写入。
 
 ### 🎨 产品级交互体验
 
@@ -62,7 +66,7 @@ Sparse (BM25 中文分词) ──┘
 
 ### 🛡️ 工程基础
 
-- **53 项单元测试**覆盖核心链路：沙盒安全 (16) / 来源解析 (7) / 入库逻辑 (15) / 检索管道 (6) / 文件名解析 (10)
+- **自动化测试**覆盖沙盒安全、来源解析、入库逻辑、检索管道、评测指标和记忆逻辑；每次 PR 与 `main` Push 由 GitHub Actions 执行后端测试。
 - **MD5 指纹去重** —— 防止重复入库浪费 Token
 - **分布式事务补偿** —— Milvus 写入失败 → PostgreSQL 自动回滚孤块
 - **三级异常体系** —— 区分可恢复/不可恢复错误，精准降级
@@ -76,12 +80,12 @@ Sparse (BM25 中文分词) ──┘
 | 层级 | 选型 |
 |:---|:---|
 | Agent 编排 | LangGraph (ReAct), LangChain |
-| 大模型 | Qwen-Max / qwen-turbo / text-embedding-v4 (1024d) / gte-rerank-v2 |
+| 大模型 | qwen3.7-max / qwen-turbo / text-embedding-v4 (1024d) / gte-rerank-v2 |
 | 向量数据库 | Milvus 2.4 (HNSW + SPARSE_INVERTED_INDEX 双索引) |
 | 关系型数据库 | PostgreSQL 15 (SQLAlchemy ORM, JSONB) |
 | 文档解析 | Docling (版面分析) + pypdf (页码追踪) |
 | 后端 | FastAPI · Pydantic V2 · SSE · multiprocessing |
-| 前端 | React 18 · TypeScript · Zustand · Shadcn/ui · Tailwind · react-pdf · react-markdown |
+| 前端 | React 19 · TypeScript · Zustand · Shadcn/ui · Tailwind · react-pdf · react-markdown |
 | 部署 | Docker Compose 一键 8 服务 |
 
 ---
@@ -93,13 +97,13 @@ PDF 上传
   → Docling 版面解析 → Markdown
   → pypdf 逐页文本提取 → chunk 页码匹配
   → 父子块切分 + LLM 元数据兜底
-  → 双库落盘: Parent → PostgreSQL / Child + 双向量 → Milvus
+  → 双库落盘: Parent → PostgreSQL / Child + Dense、Sparse 向量 → Milvus
   → MD5 指纹登记（去重）
 
 用户提问
   → LangGraph ReAct Agent
-  → memory_retriever_tool    ← 长期记忆语义检索
-  → financial_retriever_tool ← 双路召回 + RRF + Rerank
+  → memory_retriever_tool    ← 跨对话长期记忆（Dense-only）
+  → financial_retriever_tool ← Dense / Sparse + RRF + Rerank
   → python_repl_tool         ← 子进程沙盒精确计算
   → SSE 流式输出 + 来源引用（文件、页码、片段、hash）
   → 自动写入长期记忆
@@ -134,12 +138,12 @@ docker compose up -d
 | React 前端 | http://localhost:8502 | 用户界面 |
 | API 文档 (Swagger) | http://localhost:8000/docs | 后端接口调试 |
 | Milvus 管理面板 (Attu) | http://localhost:8002 | 向量数据可视化 |
-| pgAdmin | http://localhost:5050 | PostgreSQL 管理 (admin@rag.com / admin) |
+| pgAdmin | http://localhost:5050 | PostgreSQL 管理界面（凭据以本地配置为准） |
 
 ### 5. 运行测试
 
 ```bash
-# 全部 53 项测试
+# 全部后端测试
 docker compose exec backend-v2 pytest tests/ -v
 
 # 仅沙盒安全测试
@@ -162,15 +166,36 @@ docker compose exec backend-v2 pytest tests/ -v -k "not timeout"
 │   ├── prompts/        # YAML Prompt 模板, 热加载
 │   ├── services/       # ingestion, retrieval, hybrid_search, memory, progress
 │   └── tools/          # Agent 工具: finance_repl, retriever_tool, memory_tool
-├── frontend-react/     # React 18 SPA
+├── frontend-react-v2/  # 当前使用的 React SPA
 │   └── src/
 │       ├── components/ # ChatMessage, ChatArea, Sidebar, PDFViewer, ...
 │       ├── services/   # API 调用 + SSE 流式解析
 │       └── store/      # Zustand 状态管理
-├── tests/              # 53 项 pytest 用例
+├── frontend-react/     # 保留的旧版前端目录
+├── tests/              # pytest 用例
 ├── docker-compose.yml  # 8 服务编排
 └── Dockerfile
 ```
+
+## 评测
+
+默认评测仍使用原有的深信服数据集；该文件不会被中国石化数据集替换。中国石化证据集包含 15 道题，额外记录来源文件、页码和证据原文，支持确定性检索指标和原有 LLM Judge：
+
+```bash
+python evals/evaluate_rag.py
+python evals/evaluate_rag.py --dataset evals/eval_dataset_sinopec.csv
+python evals/evaluate_rag.py --dataset evals/eval_dataset_sinopec.csv --top-n 3
+```
+
+本地已完成的 14 道有明确证据题检索对比结果如下，具体报告写入被忽略的 `evals/reports/`：
+
+| 模式 | Recall@10 |
+|:---|---:|
+| Dense-only | 0.3571 |
+| Hybrid | 0.5714 |
+| Sparse-only | 0.6429 |
+
+同一轮验证中 Sparse 查询 `nnz` 最小值为 8。Top-N 仍可通过参数比较，当前默认值为 5，不把 Top-5 宣称为最优值。
 
 ---
 
