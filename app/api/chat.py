@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from app.models.schemas import ChatRequest
 from app.core.dependencies import get_agent_service
 from app.core.config import settings
+from app.tools.retriever_tool import begin_retrieval_request, end_retrieval_request
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,6 +67,7 @@ async def chat_stream_endpoint(request: ChatRequest):
 
     async def event_generator():
         full_response = ""  # 累积 AI 的完整回答，用于流结束后写入长期记忆
+        retrieval_token = begin_retrieval_request(request.query)
         try:
             async for event in agent_service.agent_executor.astream_events(
                     {"messages": messages},
@@ -130,5 +132,7 @@ async def chat_stream_endpoint(request: ChatRequest):
         except Exception as e:
             logger.error(f"❌ 流式输出异常: {str(e)}", exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'message': '服务器内部推理错误'})}\n\n"
+        finally:
+            end_retrieval_request(retrieval_token)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

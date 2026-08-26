@@ -4,8 +4,12 @@
 
 运行: docker compose exec backend-v2 pytest tests/test_chat_parsing.py -v
 """
+import asyncio
+from unittest.mock import MagicMock, patch
+
 import pytest
-from app.api.chat import _parse_sources
+from app.api.chat import _parse_sources, chat_stream_endpoint
+from app.models.schemas import ChatRequest
 
 
 def _make_evidence(file_name: str, score: float, page: int = 42, hash_val: str = "abc123", content: str = "报告期内公司实现营业收入30.09亿元。") -> str:
@@ -95,3 +99,31 @@ class TestMultipleEvidences:
     def test_no_evidence_blocks(self):
         """无证据标记的普通文本 → 空列表"""
         assert _parse_sources("这是一段没有证据标记的普通回复") == []
+
+
+class _EmptyAgentExecutor:
+    async def astream_events(self, *_args, **_kwargs):
+        if False:
+            yield None
+
+
+def test_chat_stream_opens_and_closes_request_retrieval_scope():
+    agent_service = MagicMock()
+    agent_service.system_prompt = "test prompt"
+    agent_service.agent_executor = _EmptyAgentExecutor()
+    token = object()
+
+    async def consume_stream():
+        response = await chat_stream_endpoint(ChatRequest(query="营收是多少？"))
+        return [chunk async for chunk in response.body_iterator]
+
+    with (
+        patch("app.api.chat.get_agent_service", return_value=agent_service),
+        patch("app.api.chat.begin_retrieval_request", return_value=token) as begin,
+        patch("app.api.chat.end_retrieval_request") as end,
+    ):
+        chunks = asyncio.run(consume_stream())
+
+    begin.assert_called_once_with("营收是多少？")
+    end.assert_called_once_with(token)
+    assert chunks[-1] == "data: [DONE]\n\n"
