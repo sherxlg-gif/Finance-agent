@@ -116,6 +116,9 @@ export function ChatMessage({ message, isStreaming = false }: ChatMessageProps) 
         {/* 来源标签 — 荧光笔贴纸 */}
         {!isUser && message.sources && message.sources.length > 0 && (
           <div className="mt-3 pt-2 border-t border-border/60">
+            <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+              数据来源
+            </div>
             <div className="flex flex-wrap gap-1.5">
               {message.sources.map((s, i) => (
                 <SourceTag key={`src-${i}-${s.page_number || 0}`} source={s} />
