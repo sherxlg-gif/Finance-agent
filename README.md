@@ -1,4 +1,4 @@
-# Finance Agent
+# 📈 Finance Agent — 金融投研 Agentic RAG 系统
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](#)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-green)](#)
@@ -7,27 +7,24 @@
 [![React](https://img.shields.io/badge/React-19-61dafb)](#)
 [![CI](https://github.com/sherxlg-gif/Finance-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/sherxlg-gif/Finance-agent/actions/workflows/ci.yml)
 
-面向金融财报场景的 **Agentic RAG 系统**。从 AI 生成的答案出发，可逐级追溯至原始 PDF 的精确页码——让每一条结论都可核查。
+面向金融财报的 **Agentic RAG 系统**，支持 PDF 入库、混合检索、财务计算、对话记忆和原文引用。
 
 ---
 
 ## ✨ 核心特性
 
-### 🔗 端到端溯源闭环
+### 🔗 PDF 原文引用
 
-每条 Agent 回答的引用来源均附带**页码 + 原文片段**。鼠标悬停来源标签即可预览命中文字；点击标签一键打开 PDF 原文查看器，自动跳转到对应页码，页面顶部展示黄色命中标记卡。
-
-> "这个数据从哪里来的？" → 1 次点击 → 原文第 42 页高亮位置。
+检索结果保留命中的文件、页码和原文片段。回答下方的来源标签支持悬停预览；点击后可在 PDF 查看器中打开对应页面。
 
 ### 🧠 ReAct Agent + 进程级代码沙盒
 
-基于 **LangGraph** 的 ReAct 范式智能体，LLM 自主完成「意图识别 → 工具选择 → 观察 → 回答」的推理循环。
+Agent 基于 **LangGraph** 的 ReAct 流程运行，根据问题选择财报检索、长期记忆或 Python 计算工具。
 
-针对 LLM 财务计算幻觉，封装受限于 **multiprocessing 子进程**的 Python 执行环境：
-- **10 秒超时自动 kill** —— 死循环不会卡死主进程
-- **模块白名单** —— 仅允许 math / json / datetime / collections / itertools / decimal
-- **安全拦截** —— `import os` / `open()` / `exec()` 全部被阻止
-- **5 项安全边界测试**覆盖，子进程完全隔离
+财务计算在 **multiprocessing 子进程**中执行：
+- 运行时间超过 10 秒时终止子进程
+- 仅允许 math / json / datetime / collections / itertools / decimal
+- 阻止 `import os`、`open()` 和 `exec()` 等操作
 
 ### 📊 Dense / Sparse 召回 + RRF 融合 + Rerank 重排
 
@@ -39,7 +36,7 @@ Dense (1024d 语义向量) ─┐
 Sparse (持久化 BM25) ───┘
 ```
 
-财报检索优先使用统一持久化的 BM25 词表和 Dense 向量；BM25 模型缺失、损坏或查询向量为空时，会明确降级为 `dense_only`，不会伪装成双路检索。可用以下命令从现有 Milvus Child 数据重建 Sparse 向量：
+财报 Child 入库和查询共用保存在 `data/processed/finance_bm25.json` 的 BM25 词表。模型缺失、损坏或查询向量为空时，检索会回退到 `dense_only`，日志记录实际检索模式和 Sparse `nnz`。已有 Milvus 数据可用以下命令重建 Sparse 向量：
 
 ```bash
 python -m app.scripts.rebuild_sparse
@@ -47,31 +44,29 @@ python -m app.scripts.rebuild_sparse
 
 ### 📦 Parent-Child 存储解耦
 
-Parent-Child 切分保持当前 `500` 字符块、`50` 字符重叠的参数。完整语义段落（Parent）存 **PostgreSQL**，细粒度子块（Child）及其向量存入 **Milvus**。检索命中 Child 后按命中顺序回填 Parent，并保留命中 Child 文本和实际页码，兼顾上下文完整性与引用可核验性。
+Parent 按 Markdown 标题切分，单个 Parent 超过 40,000 字符时再按长度拆分。Child 使用 `500` 字符和 `50` 字符重叠。Parent 存入 **PostgreSQL**，Child 及 Dense、Sparse 向量存入 **Milvus**。命中 Child 后按检索顺序回填 Parent，并保留命中 Child 的文本、页码和排序信息。
 
 ### 💾 三层记忆体系
 
-- **短期记忆** — 当前对话上下文窗口
-- **对话持久化** — PostgreSQL JSONB 存储，侧边栏随时切换历史对话
-- **长期记忆** — 只有明确引用“上次、以前、其他对话”时才调用；Q&A 片段以 Dense 向量存入 Milvus，跨对话进行语义检索。相同的规范化问答不会重复写入。
+- **短期记忆**：当前对话最近 10 条消息
+- **对话持久化**：对话内容存入 PostgreSQL JSONB，可从侧边栏切换
+- **长期记忆**：用户明确提到“上次、以前、其他对话”时，通过 Dense 向量检索 Milvus 中的历史问答；正常回答完成后写入，相同问答不会重复保存
 
-### 🎨 产品级交互体验
+### 🎨 前端功能
 
-- **Markdown 渲染** — LLM 输出的表格/代码/列表/标题原生排版，金融数据表格带斑马条纹
-- **暗色模式** — 一键切换，localStorage 持久化偏好
-- **对话自动标题** — 首轮问答后用 qwen-turbo 自动生成 10 字摘要
-- **对话重命名** — 双击侧边栏标题即可编辑
-- **文件管理** — 上传/删除/预览 PDF，文件列表显示大小与入库日期
-- **📱 响应式** — 桌面侧边栏常驻 + 移动端汉堡菜单浮层
+- **Markdown 渲染**：支持表格、代码、列表和标题
+- **主题切换**：通过 localStorage 保存明暗主题
+- **对话管理**：自动生成标题，支持重命名和历史对话切换
+- **文件管理**：上传、删除和预览 PDF，并显示解析进度
+- **响应式布局**：适配桌面和移动端
 
-### 🛡️ 工程基础
+### 🛡️ 工程与测试
 
-- **自动化测试**覆盖沙盒安全、来源解析、入库逻辑、检索管道、评测指标和记忆逻辑；每次 PR 与 `main` Push 由 GitHub Actions 执行后端测试。
-- **MD5 指纹去重** —— 防止重复入库浪费 Token
-- **分布式事务补偿** —— Milvus 写入失败 → PostgreSQL 自动回滚孤块
-- **三级异常体系** —— 区分可恢复/不可恢复错误，精准降级
-- **Recursion Limit** —— Agent 步数上限 10，防止无限循环
-- **SSE 流式输出** —— 实时展示 LLM 逐字生成 + 工具调用状态
+- GitHub Actions 在 PR 和 `main` Push 时运行后端测试、前端 lint/build 和 Docker Compose 配置检查
+- PDF 使用 MD5 指纹去重
+- Milvus 写入失败时回滚本次写入 PostgreSQL 的 Parent
+- Agent 最大执行步数为 10
+- 对话接口通过 SSE 返回回答、工具状态和来源
 
 ---
 
@@ -81,9 +76,9 @@ Parent-Child 切分保持当前 `500` 字符块、`50` 字符重叠的参数。�
 |:---|:---|
 | Agent 编排 | LangGraph (ReAct), LangChain |
 | 大模型 | qwen3.7-max / qwen-turbo / text-embedding-v4 (1024d) / gte-rerank-v2 |
-| 向量数据库 | Milvus 2.4 (HNSW + SPARSE_INVERTED_INDEX 双索引) |
+| 向量数据库 | Milvus 2.4 (AUTOINDEX + SPARSE_INVERTED_INDEX) |
 | 关系型数据库 | PostgreSQL 15 (SQLAlchemy ORM, JSONB) |
-| 文档解析 | Docling (版面分析) + pypdf (页码追踪) |
+| 文档解析 | pypdf (数字 PDF) + Docling (扫描件兜底) |
 | 后端 | FastAPI · Pydantic V2 · SSE · multiprocessing |
 | 前端 | React 19 · TypeScript · Zustand · Shadcn/ui · Tailwind · react-pdf · react-markdown |
 | 部署 | Docker Compose 一键 8 服务 |
@@ -94,9 +89,11 @@ Parent-Child 切分保持当前 `500` 字符块、`50` 字符重叠的参数。�
 
 ```
 PDF 上传
-  → Docling 版面解析 → Markdown
-  → pypdf 逐页文本提取 → chunk 页码匹配
-  → 父子块切分 + LLM 元数据兜底
+  → pypdf 提取逐页文本
+  → 扫描件或低文本 PDF 使用 Docling 分批解析
+  → Parent 按标题切分 / Child 按 500 字符切分
+  → Child 文本匹配 PDF 页码
+  → 文件名解析，必要时由 LLM 补充公司和年份
   → 双库落盘: Parent → PostgreSQL / Child + Dense、Sparse 向量 → Milvus
   → MD5 指纹登记（去重）
 
@@ -138,12 +135,12 @@ docker compose up -d
 | React 前端 | http://localhost:8502 | 用户界面 |
 | API 文档 (Swagger) | http://localhost:8000/docs | 后端接口调试 |
 | Milvus 管理面板 (Attu) | http://localhost:8002 | 向量数据可视化 |
-| pgAdmin | http://localhost:5050 | PostgreSQL 管理界面（凭据以本地配置为准） |
+| pgAdmin | http://localhost:5050 | PostgreSQL 管理界面（admin@rag.com / admin） |
 
 ### 5. 运行测试
 
 ```bash
-# 全部后端测试
+# 运行后端测试
 docker compose exec backend-v2 pytest tests/ -v
 
 # 仅沙盒安全测试
@@ -173,30 +170,23 @@ docker compose exec backend-v2 pytest tests/ -v -k "not timeout"
 │       └── store/      # Zustand 状态管理
 ├── frontend-react/     # 保留的旧版前端目录
 ├── tests/              # pytest 用例
+├── evals/              # 评测数据与脚本
+├── .github/workflows/  # GitHub Actions
 ├── docker-compose.yml  # 8 服务编排
 └── Dockerfile
 ```
 
-## 评测
+## 🧪 评测
 
-默认评测仍使用原有的深信服数据集；该文件不会被中国石化数据集替换。中国石化证据集包含 15 道题，额外记录来源文件、页码和证据原文，支持确定性检索指标和原有 LLM Judge：
+新增 `evals/eval_dataset_sinopec.csv`，包含 15 道中国石化财报问题。每道题记录标准答案、来源文件、页码、证据原文和答案类型，覆盖数值定位、表格信息、业务描述、Python 计算和无答案拒答。
 
 ```bash
-python evals/evaluate_rag.py
 python evals/evaluate_rag.py --dataset evals/eval_dataset_sinopec.csv
 python evals/evaluate_rag.py --dataset evals/eval_dataset_sinopec.csv --top-n 3
 ```
 
-本地已完成的 14 道有明确证据题检索对比结果如下，具体报告写入被忽略的 `evals/reports/`：
-
-| 模式 | Recall@10 |
-|:---|---:|
-| Dense-only | 0.3571 |
-| Hybrid | 0.5714 |
-| Sparse-only | 0.6429 |
-
-同一轮验证中 Sparse 查询 `nnz` 最小值为 8。Top-N 仍可通过参数比较，当前默认值为 5，不把 Top-5 宣称为最优值。
+评测报告写入 `evals/reports/`，包含 LLM Judge、Recall@5、Recall@10、MRR@10、页码与证据原文命中率、Sparse `nnz`，并对比 Dense-only、Sparse-only 和 Hybrid 三种检索模式。`--top-n` 可用于测试不同的返回数量，系统默认值为 5。
 
 ---
 
-> 📌 建议上传 `公司名+年份+报告类型.pdf` 格式的财报文件（如 `深信服2025年半年度报告.pdf`），以便系统自动提取年份与公司信息。命名不规范时，LLM 会从正文中自动提取。
+> 📌 建议使用 `公司名+年份+报告类型.pdf` 作为文件名，例如 `中国石化2026年半年度报告.pdf`。文件名无法识别时，系统会从正文中提取公司和年份。
