@@ -38,7 +38,9 @@ def test_store_episode_skips_duplicate_question_answer_without_vector_write():
     assert collection.insert.call_count == 1
     assert service.embeddings.embed_query.call_count == 1
     payload = collection.insert.call_args.args[0]
-    assert payload[3] == [{}]
+    assert len(payload[3]) == 1
+    assert payload[3][0]
+    assert all(value > 0 for value in payload[3][0].values())
 
 
 def test_search_memories_uses_dense_vector_search_only():

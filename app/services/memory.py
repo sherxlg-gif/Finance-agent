@@ -28,6 +28,10 @@ from app.database import get_db_session, LongTermMemory
 
 logger = logging.getLogger(__name__)
 
+# 现有 Collection 的 sparse_vector 为必填字段。长期记忆只查 Dense，
+# 因此写入固定非零占位，避免 Milvus 拒绝空 Sparse 行。
+_DENSE_ONLY_SPARSE_PLACEHOLDER = {0: 1.0}
+
 
 def _normalize_memory_part(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip()
@@ -166,7 +170,7 @@ class MemoryService:
                 [memory_id],       # chunk_id
                 [trunc_text],       # text
                 [dense_vec],        # dense_vector
-                [{}],               # 保留现有 schema，长期记忆不使用 Sparse
+                [_DENSE_ONLY_SPARSE_PLACEHOLDER],  # 兼容现有 schema，不参与检索
                 [meta],             # metadata
             ])
             collection.flush()
