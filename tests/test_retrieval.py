@@ -8,7 +8,21 @@ from types import SimpleNamespace
 from langchain_core.documents import Document
 
 from app.core.exceptions import RerankError
-from app.services.retrieval import RetrievalService
+from app.services.retrieval import RetrievalService, build_company_filter
+
+
+def test_company_filter_matches_exact_and_legacy_prefixed_metadata():
+    expression = build_company_filter("中国石化")
+
+    assert 'metadata["company"] == "中国石化"' in expression
+    assert 'metadata["company"] like "中国石化:%"' in expression
+    assert 'metadata["company"] like "中国石化：%"' in expression
+
+
+def test_company_filter_escapes_expression_quotes():
+    expression = build_company_filter('A"B')
+
+    assert '\\"' in expression
 
 
 class TestRetrievalService:

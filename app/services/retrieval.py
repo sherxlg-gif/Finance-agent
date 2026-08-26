@@ -13,6 +13,24 @@ from app.database import get_db_session, ParentDocument
 logger = logging.getLogger(__name__)
 
 
+def _escape_milvus_string(value: str) -> str:
+    """Escape a user/model-provided value before placing it in a Milvus expression."""
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def build_company_filter(company: str) -> str:
+    """Match normalized names and legacy filenames stored as ``Company:Company``."""
+    escaped = _escape_milvus_string(company.strip())
+    variants = [
+        f'metadata["company"] == "{escaped}"',
+        f'metadata["company"] like "{escaped}:%"',
+        f'metadata["company"] like "{escaped}：%"',
+        f'metadata["company"] like "{escaped}_%"',
+        f'metadata["company"] like "{escaped}-%"',
+    ]
+    return "(" + " or ".join(variants) + ")"
+
+
 class RetrievalService:
     def __init__(self):
         dashscope.api_key = settings.DASHSCOPE_API_KEY
@@ -150,7 +168,7 @@ class RetrievalService:
             # =======================================================
             expr_parts = ['metadata["doc_level"] == "child"']
             if company:
-                expr_parts.append(f'metadata["company"] == "{company}"')
+                expr_parts.append(build_company_filter(company))
             if year:
                 expr_parts.append(f'metadata["year"] == "{year}"')
             expr = " and ".join(expr_parts)
